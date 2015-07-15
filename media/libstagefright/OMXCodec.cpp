@@ -1886,7 +1886,7 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
         return err;
     }
 
-#ifndef USE_SAMSUNG_COLORFORMAT
+#ifdef USE_SAMSUNG_COLORFORMAT
     OMX_COLOR_FORMATTYPE eColorFormat;
 
     switch (def.format.video.eColorFormat) {
@@ -1912,14 +1912,11 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
         initNativeWindowCrop();
     }
 #else
-    OMX_COLOR_FORMATTYPE eNativeColorFormat = def.format.video.eColorFormat;
-    setNativeWindowColorFormat(eNativeColorFormat);
-
     err = native_window_set_buffers_geometry(
-    mNativeWindow.get(),
-    def.format.video.nFrameWidth,
-    def.format.video.nFrameHeight,
-    eNativeColorFormat);
+            mNativeWindow.get(),
+            def.format.video.nFrameWidth,
+            def.format.video.nFrameHeight,
+            def.format.video.eColorFormat);
 #endif
 
     if (err != 0) {
