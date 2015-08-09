@@ -1509,14 +1509,15 @@ void LiveSession::onChangeConfiguration3(const sp<AMessage> &msg) {
 
                     if (meta != NULL && !meta->findInt32("discontinuity", &type)) {
                         int64_t tmpUs;
-                        CHECK(meta->findInt64("timeUs", &tmpUs));
-                        if (startTimeUs < 0 || tmpUs < startTimeUs) {
-                            startTimeUs = tmpUs;
-                        }
+                        int64_t tmpSegmentUs;
 
-                        CHECK(meta->findInt64("segmentStartTimeUs", &tmpUs));
-                        if (segmentStartTimeUs < 0 || tmpUs < segmentStartTimeUs) {
-                            segmentStartTimeUs = tmpUs;
+                        CHECK(meta->findInt64("timeUs", &tmpUs));
+                        CHECK(meta->findInt64("segmentStartTimeUs", &tmpSegmentUs));
+                        if (startTimeUs < 0 || tmpSegmentUs < segmentStartTimeUs) {
+                            startTimeUs = tmpUs;
+                            segmentStartTimeUs = tmpSegmentUs;
+                        } else if (tmpSegmentUs == segmentStartTimeUs && tmpUs < startTimeUs) {
+                            startTimeUs = tmpUs;
                         }
 
                         int32_t seq;
@@ -1628,6 +1629,12 @@ void LiveSession::onCheckSwitchDown() {
         return;
     }
 
+    if (mSwitchInProgress || mReconfigurationInProgress) {
+        ALOGV("Switch/Reconfig in progress, defer switch down");
+        mSwitchDownMonitor->post(1000000ll);
+        return;
+    }
+
     for (size_t i = 0; i < kMaxStreams; ++i) {
         int32_t targetDuration;
         sp<AnotherPacketSource> packetSource = mPacketSources.valueFor(indexToType(i));
@@ -1658,7 +1665,6 @@ void LiveSession::onSwitchDown() {
         return;
     }
 
-    changeConfiguration(-1, mCurBandwidthIndex - 1, false);
 }
 
 // Mark switch done when:

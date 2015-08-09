@@ -177,6 +177,14 @@ private:
 
     bool mStarted;
 
+    // Actual pause state, either as requested by client or due to buffering.
+    bool mPaused;
+
+    // Pause state as requested by client. Note that if mPausedByClient is
+    // true, mPaused is always true; if mPausedByClient is false, mPaused could
+    // still become true, when we pause internally due to buffering.
+    bool mPausedByClient;
+
     inline const sp<DecoderBase> &getDecoder(bool audio) {
         return audio ? mAudioDecoder : mVideoDecoder;
     }
@@ -193,6 +201,8 @@ private:
 
     status_t instantiateDecoder(bool audio, sp<DecoderBase> *decoder);
 
+    status_t onInstantiateSecureDecoders();
+
     void updateVideoSize(
             const sp<AMessage> &inputFormat,
             const sp<AMessage> &outputFormat = NULL);
@@ -204,6 +214,7 @@ private:
 
     void onStart();
     void onResume();
+    void onPause();
 
     bool audioDecoderStillNeeded();
 

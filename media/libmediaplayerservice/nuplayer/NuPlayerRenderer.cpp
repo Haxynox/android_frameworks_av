@@ -24,6 +24,7 @@
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/foundation/AMessage.h>
 #include <media/stagefright/foundation/AUtils.h>
+#include <media/stagefright/foundation/AWakeLock.h>
 #include <media/stagefright/MediaErrors.h>
 #include <media/stagefright/MetaData.h>
 #include <media/stagefright/Utils.h>
@@ -87,7 +88,9 @@ NuPlayer::Renderer::Renderer(
       mCurrentOffloadInfo(AUDIO_INFO_INITIALIZER),
       mCurrentPcmInfo(AUDIO_PCMINFO_INITIALIZER),
       mTotalBuffersQueued(0),
-      mLastAudioBufferDrained(0) {
+      mLastAudioBufferDrained(0),
+      mWakeLock(new AWakeLock()) {
+
 }
 
 NuPlayer::Renderer::~Renderer() {
@@ -424,7 +427,8 @@ void NuPlayer::Renderer::onMessageReceived(const sp<AMessage> &msg) {
 
             onDrainVideoQueue();
 
-            postDrainVideoQueue();
+            Mutex::Autolock autoLock(mLock);
+            postDrainVideoQueue_l();
             break;
         }
 
@@ -437,7 +441,8 @@ void NuPlayer::Renderer::onMessageReceived(const sp<AMessage> &msg) {
             }
 
             mDrainVideoQueuePending = false;
-            postDrainVideoQueue();
+            Mutex::Autolock autoLock(mLock);
+            postDrainVideoQueue_l();
             break;
         }
 
@@ -512,6 +517,7 @@ void NuPlayer::Renderer::onMessageReceived(const sp<AMessage> &msg) {
             }
             ALOGV("Audio Offload tear down due to pause timeout.");
             onAudioOffloadTearDown(kDueToTimeout);
+            mWakeLock->release();
             break;
         }
 
@@ -766,7 +772,7 @@ int64_t NuPlayer::Renderer::getPendingAudioPlayoutDurationUs(int64_t nowUs) {
 
 int64_t NuPlayer::Renderer::getRealTimeUs(int64_t mediaTimeUs, int64_t nowUs) {
     int64_t currentPositionUs;
-    if (getCurrentPositionOnLooper(
+    if (mPaused || getCurrentPositionOnLooper(
             &currentPositionUs, nowUs, true /* allowPastQueuedVideo */) != OK) {
         // If failed to get current position, e.g. due to audio clock is not ready, then just
         // play out video immediately without delay.
@@ -787,7 +793,7 @@ void NuPlayer::Renderer::onNewAudioMediaTime(int64_t mediaTimeUs) {
             mediaTimeUs, nowUs + getPendingAudioPlayoutDurationUs(nowUs), mNumFramesWritten);
 }
 
-void NuPlayer::Renderer::postDrainVideoQueue() {
+void NuPlayer::Renderer::postDrainVideoQueue_l() {
     if (mDrainVideoQueuePending
             || mSyncQueues
             || (mPaused && mVideoSampleReceived)) {
@@ -823,6 +829,7 @@ void NuPlayer::Renderer::postDrainVideoQueue() {
 
         if (mAnchorTimeMediaUs < 0) {
             setAnchorTime(mediaTimeUs, nowUs);
+            mPausePositionMediaTimeUs = mediaTimeUs;
             mAnchorMaxMediaUs = mediaTimeUs;
             realTimeUs = nowUs;
         } else {
@@ -986,16 +993,15 @@ void NuPlayer::Renderer::onQueueBuffer(const sp<AMessage> &msg) {
     entry.mFinalResult = OK;
     entry.mBufferOrdinal = ++mTotalBuffersQueued;
 
+    Mutex::Autolock autoLock(mLock);
     if (audio) {
-        Mutex::Autolock autoLock(mLock);
         mAudioQueue.push_back(entry);
         postDrainAudioQueue_l();
     } else {
         mVideoQueue.push_back(entry);
-        postDrainVideoQueue();
+        postDrainVideoQueue_l();
     }
 
-    Mutex::Autolock autoLock(mLock);
     if (!mSyncQueues || mAudioQueue.empty() || mVideoQueue.empty()) {
         return;
     }
@@ -1044,7 +1050,7 @@ void NuPlayer::Renderer::syncQueuesDone_l() {
     }
 
     if (!mVideoQueue.empty()) {
-        postDrainVideoQueue();
+        postDrainVideoQueue_l();
     }
 }
 
@@ -1063,8 +1069,8 @@ void NuPlayer::Renderer::onQueueEOS(const sp<AMessage> &msg) {
     entry.mOffset = 0;
     entry.mFinalResult = finalResult;
 
+    Mutex::Autolock autoLock(mLock);
     if (audio) {
-        Mutex::Autolock autoLock(mLock);
         if (mAudioQueue.empty() && mSyncQueues) {
             syncQueuesDone_l();
         }
@@ -1072,11 +1078,10 @@ void NuPlayer::Renderer::onQueueEOS(const sp<AMessage> &msg) {
         postDrainAudioQueue_l();
     } else {
         if (mVideoQueue.empty() && mSyncQueues) {
-            Mutex::Autolock autoLock(mLock);
             syncQueuesDone_l();
         }
         mVideoQueue.push_back(entry);
-        postDrainVideoQueue();
+        postDrainVideoQueue_l();
     }
 }
 
@@ -1229,18 +1234,20 @@ void NuPlayer::Renderer::onPause() {
         return;
     }
     int64_t currentPositionUs;
+    int64_t pausePositionMediaTimeUs;
     if (getCurrentPositionFromAnchor(
             &currentPositionUs, ALooper::GetNowUs()) == OK) {
-        mPausePositionMediaTimeUs = currentPositionUs;
+        pausePositionMediaTimeUs = currentPositionUs;
     } else {
         // Set paused position to -1 (unavailabe) if we don't have anchor time
         // This could happen if client does a seekTo() immediately followed by
         // pause(). Renderer will be flushed with anchor time cleared. We don't
         // want to leave stale value in mPausePositionMediaTimeUs.
-        mPausePositionMediaTimeUs = -1;
+        pausePositionMediaTimeUs = -1;
     }
     {
         Mutex::Autolock autoLock(mLock);
+        mPausePositionMediaTimeUs = pausePositionMediaTimeUs;
         ++mAudioQueueGeneration;
         ++mVideoQueueGeneration;
         prepareForMediaRenderingStart();
@@ -1284,7 +1291,7 @@ void NuPlayer::Renderer::onResume() {
     }
 
     if (!mVideoQueue.empty()) {
-        postDrainVideoQueue();
+        postDrainVideoQueue_l();
     }
 }
 
@@ -1382,6 +1389,7 @@ void NuPlayer::Renderer::onAudioOffloadTearDown(AudioOffloadTearDownReason reaso
 
 void NuPlayer::Renderer::startAudioOffloadPauseTimeout() {
     if (offloadingAudio()) {
+        mWakeLock->acquire();
         sp<AMessage> msg = new AMessage(kWhatAudioOffloadPauseTimeout, id());
         msg->setInt32("generation", mAudioOffloadPauseTimeoutGeneration);
         msg->post(kOffloadPauseMaxUs);
@@ -1390,6 +1398,7 @@ void NuPlayer::Renderer::startAudioOffloadPauseTimeout() {
 
 void NuPlayer::Renderer::cancelAudioOffloadPauseTimeout() {
     if (offloadingAudio()) {
+        mWakeLock->release(true);
         ++mAudioOffloadPauseTimeoutGeneration;
     }
 }

@@ -23,6 +23,7 @@
 namespace android {
 
 struct ABuffer;
+class  AWakeLock;
 struct VideoFrameScheduler;
 
 struct NuPlayer::Renderer : public AHandler {
@@ -194,6 +195,8 @@ private:
     int32_t mTotalBuffersQueued;
     int32_t mLastAudioBufferDrained;
 
+    sp<AWakeLock> mWakeLock;
+
     status_t getCurrentPositionOnLooper(int64_t *mediaUs);
     status_t getCurrentPositionOnLooper(
             int64_t *mediaUs, int64_t nowUs, bool allowPastQueuedVideo = false);
@@ -212,7 +215,7 @@ private:
     int64_t getRealTimeUs(int64_t mediaTimeUs, int64_t nowUs);
 
     void onDrainVideoQueue();
-    void postDrainVideoQueue();
+    void postDrainVideoQueue_l();
 
     void prepareForMediaRenderingStart();
     void notifyIfMediaRenderingStarted();

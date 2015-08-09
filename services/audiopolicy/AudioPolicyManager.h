@@ -264,7 +264,7 @@ protected:
 
             audio_gain_mode_t loadGainMode(char *name);
             void loadGain(cnode *root, int index);
-            void loadGains(cnode *root);
+            virtual void loadGains(cnode *root);
 
             // searches for an exact match
             status_t checkExactSamplingRate(uint32_t samplingRate) const;
@@ -344,10 +344,14 @@ protected:
             virtual ~DeviceDescriptor() {}
 
             bool equals(const sp<DeviceDescriptor>& other) const;
+
+            // AudioPortConfig
+            virtual sp<AudioPort> getAudioPort() const { return (AudioPort*) this; }
             virtual void toAudioPortConfig(struct audio_port_config *dstConfig,
                                    const struct audio_port_config *srcConfig = NULL) const;
-            virtual sp<AudioPort> getAudioPort() const { return (AudioPort*) this; }
 
+            // AudioPort
+            virtual void loadGains(cnode *root);
             virtual void toAudioPort(struct audio_port *port) const;
 
             status_t dump(int fd, int spaces, int index) const;
@@ -925,6 +929,9 @@ private:
         status_t setDeviceConnectionStateInt(audio_devices_t device,
                                                           audio_policy_dev_state_t state,
                                                           const char *device_address);
+        sp<DeviceDescriptor>  getDeviceDescriptor(const audio_devices_t device,
+                                                  const char *device_address);
+
 };
 
 };

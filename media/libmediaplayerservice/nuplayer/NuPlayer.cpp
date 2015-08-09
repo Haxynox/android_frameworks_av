@@ -180,7 +180,9 @@ NuPlayer::NuPlayer()
       mFlushingVideo(NONE),
       mResumePending(false),
       mVideoScalingMode(NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW),
-      mStarted(false) {
+      mStarted(false),
+      mPaused(false),
+      mPausedByClient(false) {
     clearFlushComplete();
 }
 
@@ -598,6 +600,7 @@ void NuPlayer::onMessageReceived(const sp<AMessage> &msg) {
             } else {
                 onStart();
             }
+            mPausedByClient = false;
             break;
         }
 
@@ -956,16 +959,8 @@ void NuPlayer::onMessageReceived(const sp<AMessage> &msg) {
 
         case kWhatPause:
         {
-            if (mSource != NULL) {
-                mSource->pause();
-            } else {
-                ALOGW("pause called when source is gone or not set");
-            }
-            if (mRenderer != NULL) {
-                mRenderer->pause();
-            } else {
-                ALOGW("pause called when renderer is gone or not set");
-            }
+            onPause();
+            mPausedByClient = true;
             break;
         }
 
@@ -988,6 +983,10 @@ void NuPlayer::onMessageReceived(const sp<AMessage> &msg) {
 }
 
 void NuPlayer::onResume() {
+    if (!mPaused) {
+        return;
+    }
+    mPaused = false;
     if (mSource != NULL) {
         mSource->resume();
     } else {
@@ -1005,22 +1004,40 @@ void NuPlayer::onResume() {
     }
 }
 
+status_t NuPlayer::onInstantiateSecureDecoders() {
+    status_t err;
+    if (!(mSourceFlags & Source::FLAG_SECURE)) {
+        return BAD_TYPE;
+    }
+
+    if (mRenderer != NULL) {
+        ALOGE("renderer should not be set when instantiating secure decoders");
+        return UNKNOWN_ERROR;
+    }
+
+    // TRICKY: We rely on mRenderer being null, so that decoder does not start requesting
+    // data on instantiation.
+    if (mNativeWindow != NULL) {
+        err = instantiateDecoder(false, &mVideoDecoder);
+        if (err != OK) {
+            return err;
+        }
+    }
+
+    if (mAudioSink != NULL) {
+        err = instantiateDecoder(true, &mAudioDecoder);
+        if (err != OK) {
+            return err;
+        }
+    }
+    return OK;
+}
+
 void NuPlayer::onStart() {
     mOffloadAudio = false;
     mAudioEOS = false;
     mVideoEOS = false;
     mStarted = true;
-
-    /* instantiate decoders now for secure playback */
-    if (mSourceFlags & Source::FLAG_SECURE) {
-        if (mNativeWindow != NULL) {
-            instantiateDecoder(false, &mVideoDecoder);
-        }
-
-        if (mAudioSink != NULL) {
-            instantiateDecoder(true, &mAudioDecoder);
-        }
-    }
 
     mSource->start();
 
@@ -1070,6 +1087,23 @@ void NuPlayer::onStart() {
     }
 
     postScanSources();
+}
+
+void NuPlayer::onPause() {
+    if (mPaused) {
+        return;
+    }
+    mPaused = true;
+    if (mSource != NULL) {
+        mSource->pause();
+    } else {
+        ALOGW("pause called when source is gone or not set");
+    }
+    if (mRenderer != NULL) {
+        mRenderer->pause();
+    } else {
+        ALOGW("pause called when renderer is gone or not set");
+    }
 }
 
 bool NuPlayer::audioDecoderStillNeeded() {
@@ -1185,7 +1219,9 @@ status_t NuPlayer::instantiateDecoder(bool audio, sp<DecoderBase> *decoder) {
         CHECK(format->findString("mime", &mime));
 
         sp<AMessage> ccNotify = new AMessage(kWhatClosedCaptionNotify, id());
-        mCCDecoder = new CCDecoder(ccNotify);
+        if (mCCDecoder == NULL) {
+            mCCDecoder = new CCDecoder(ccNotify);
+        }
 
         if (mSourceFlags & Source::FLAG_SECURE) {
             format->setInt32("secure", true);
@@ -1353,7 +1389,7 @@ void NuPlayer::flushDecoder(bool audio, bool needShutdown) {
     FlushStatus newStatus =
         needShutdown ? FLUSHING_DECODER_SHUTDOWN : FLUSHING_DECODER;
 
-    mFlushComplete[audio][false /* isDecoder */] = false;
+    mFlushComplete[audio][false /* isDecoder */] = (mRenderer == NULL);
     mFlushComplete[audio][true /* isDecoder */] = false;
     if (audio) {
         ALOGE_IF(mFlushingAudio != NONE,
@@ -1638,6 +1674,23 @@ void NuPlayer::onSourceNotify(const sp<AMessage> &msg) {
     CHECK(msg->findInt32("what", &what));
 
     switch (what) {
+        case Source::kWhatInstantiateSecureDecoders:
+        {
+            if (mSource == NULL) {
+                // This is a stale notification from a source that was
+                // asynchronously preparing when the client called reset().
+                // We handled the reset, the source is gone.
+                break;
+            }
+
+            sp<AMessage> reply;
+            CHECK(msg->findMessage("reply", &reply));
+            status_t err = onInstantiateSecureDecoders();
+            reply->setInt32("err", err);
+            reply->post();
+            break;
+        }
+
         case Source::kWhatPrepared:
         {
             if (mSource == NULL) {
@@ -1649,6 +1702,14 @@ void NuPlayer::onSourceNotify(const sp<AMessage> &msg) {
 
             int32_t err;
             CHECK(msg->findInt32("err", &err));
+
+            if (err != OK) {
+                // shut down potential secure codecs in case client never calls reset
+                mDeferredActions.push_back(
+                        new FlushDecoderAction(FLUSH_CMD_SHUTDOWN /* audio */,
+                                               FLUSH_CMD_SHUTDOWN /* video */));
+                processDeferredActions();
+            }
 
             sp<NuPlayerDriver> driver = mDriver.promote();
             if (driver != NULL) {
@@ -1709,15 +1770,46 @@ void NuPlayer::onSourceNotify(const sp<AMessage> &msg) {
             break;
         }
 
+        case Source::kWhatPauseOnBufferingStart:
+        {
+            // ignore if not playing
+            if (mStarted && !mPausedByClient) {
+                ALOGI("buffer low, pausing...");
+
+                onPause();
+            }
+            // fall-thru
+        }
+
         case Source::kWhatBufferingStart:
         {
             notifyListener(MEDIA_INFO, MEDIA_INFO_BUFFERING_START, 0);
             break;
         }
 
+        case Source::kWhatResumeOnBufferingEnd:
+        {
+            // ignore if not playing
+            if (mStarted && !mPausedByClient) {
+                ALOGI("buffer ready, resuming...");
+
+                onResume();
+            }
+            // fall-thru
+        }
+
         case Source::kWhatBufferingEnd:
         {
             notifyListener(MEDIA_INFO, MEDIA_INFO_BUFFERING_END, 0);
+            break;
+        }
+
+        case Source::kWhatCacheStats:
+        {
+            int32_t kbps;
+            CHECK(msg->findInt32("bandwidth", &kbps));
+
+            notifyListener(MEDIA_INFO, MEDIA_INFO_NETWORK_BANDWIDTH, kbps);
             break;
         }
 
@@ -1900,6 +1992,13 @@ void NuPlayer::Source::notifyPrepared(status_t err) {
     sp<AMessage> notify = dupNotify();
     notify->setInt32("what", kWhatPrepared);
     notify->setInt32("err", err);
+    notify->post();
+}
+
+void NuPlayer::Source::notifyInstantiateSecureDecoders(const sp<AMessage> &reply) {
+    sp<AMessage> notify = dupNotify();
+    notify->setInt32("what", kWhatInstantiateSecureDecoders);
+    notify->setMessage("reply", reply);
     notify->post();
 }
 
