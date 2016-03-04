@@ -920,8 +920,8 @@ status_t ACodec::setupNativeWindowSizeFormatAndUsage(
     ALOGV("gralloc usage: %#x(OMX) => %#x(ACodec)", omxUsage, usage);
     return setNativeWindowSizeFormatAndUsage(
             nativeWindow,
-            def.format.video.nFrameWidth,
-            def.format.video.nFrameHeight,
+            width,
+            height,
 #ifdef USE_SAMSUNG_COLORFORMAT
             eNativeColorFormat,
 #else
@@ -1261,7 +1261,9 @@ void ACodec::dumpBuffers(OMX_U32 portIndex) {
 void ACodec::setNativeWindowColorFormat(OMX_COLOR_FORMATTYPE &eNativeColorFormat)
 {
     // In case of Samsung decoders, we set proper native color format for the Native Window
-    if (!strcasecmp(mComponentName.c_str(), "OMX.Exynos.AVC.Decoder")) {
+    if (!strcasecmp(mComponentName.c_str(), "OMX.SEC.AVC.Decoder")
+        || !strcasecmp(mComponentName.c_str(), "OMX.SEC.FP.AVC.Decoder")
+        || !strcasecmp(mComponentName.c_str(), "OMX.SEC.MPEG4.Decoder")) {
         switch (eNativeColorFormat) {
             case OMX_COLOR_FormatYUV420SemiPlanar:
                 eNativeColorFormat = (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_YCbCr_420_SP;

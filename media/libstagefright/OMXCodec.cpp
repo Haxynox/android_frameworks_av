@@ -60,6 +60,10 @@
 #include <sec_format.h>
 #endif
 
+#ifdef USE_SAMSUNG_COLORFORMAT
+#include <sec_format.h>
+#endif
+
 namespace android {
 #ifdef USE_SAMSUNG_COLORFORMAT
 static const int OMX_SEC_COLOR_FormatNV12TPhysicalAddress = 0x7F000001;
@@ -781,7 +785,10 @@ status_t OMXCodec::setVideoPortFormatType(
 }
 
 #ifdef USE_SAMSUNG_COLORFORMAT
-#define ALIGN(x, a) (((x) + (a) - 1) & ~((a) - 1))
+#define ALIGN_TO_8KB(x)   ((((x) + (1 << 13) - 1) >> 13) << 13)
+#define ALIGN_TO_32B(x)   ((((x) + (1 <<  5) - 1) >>  5) <<  5)
+#define ALIGN_TO_128B(x)  ((((x) + (1 <<  7) - 1) >>  7) <<  7)
+#define ALIGN(x, a)       (((x) + (a) - 1) & ~((a) - 1))
 #endif
 
 static size_t getFrameSize(
@@ -803,8 +810,6 @@ static size_t getFrameSize(
         * this part in the future
         */
         case OMX_COLOR_FormatAndroidOpaque:
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wswitch"
 #ifdef USE_SAMSUNG_COLORFORMAT
         case OMX_SEC_COLOR_FormatNV12TPhysicalAddress:
         case OMX_SEC_COLOR_FormatNV12LPhysicalAddress:
@@ -815,12 +820,10 @@ static size_t getFrameSize(
         case OMX_SEC_COLOR_FormatNV12LVirtualAddress:
             return ALIGN((ALIGN(width, 16) * ALIGN(height, 16)), 2048) + ALIGN((ALIGN(width, 16) * ALIGN(height >> 1, 8)), 2048);
         case OMX_SEC_COLOR_FormatNV12Tiled:
-            static unsigned int frameBufferYSise = calc_plane(width, height);
-            static unsigned int frameBufferUVSise = calc_plane(width, height >> 1);
+            static unsigned int frameBufferYSise = ALIGN_TO_8KB(ALIGN_TO_128B(width) * ALIGN_TO_32B(height));
+            static unsigned int frameBufferUVSise = ALIGN_TO_8KB(ALIGN_TO_128B(width) * ALIGN_TO_32B(height/2));
             return (frameBufferYSise + frameBufferUVSise);
 #endif
-#pragma clang diagnostic pop
-
         default:
             CHECK(!"Should not be here. Unsupported color format.");
             break;
@@ -1377,6 +1380,15 @@ status_t OMXCodec::setVideoOutputFormat(
             }
         }
 
+#ifdef USE_SAMSUNG_COLORFORMAT
+        if (!strncmp("OMX.SEC.", mComponentName, 8)) {
+            if (mNativeWindow == NULL)
+                format.eColorFormat = OMX_COLOR_FormatYUV420Planar;
+            else
+                format.eColorFormat = OMX_COLOR_FormatYUV420SemiPlanar;
+        }
+#endif
+
         err = mOMX->setParameter(
                 mNode, OMX_IndexParamVideoPortFormat,
                 &format, sizeof(format));
@@ -1859,12 +1871,29 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
     setNativeWindowColorFormat(eNativeColorFormat);
 #endif
 
+#ifdef USE_SAMSUNG_COLORFORMAT
+    OMX_COLOR_FORMATTYPE eColorFormat;
+
+    switch (def.format.video.eColorFormat) {
+    case OMX_SEC_COLOR_FormatNV12TPhysicalAddress:
+         eColorFormat = (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_CUSTOM_YCbCr_420_SP_TILED;
+         break;
+    case OMX_COLOR_FormatYUV420SemiPlanar:
+         eColorFormat = (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_YCbCr_420_SP;
+         break;
+    case OMX_COLOR_FormatYUV420Planar:
+    default:
+         eColorFormat = (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_YCbCr_420_P;
+         break;
+    }
+#endif
+
     err = setNativeWindowSizeFormatAndUsage(
             mNativeWindow.get(),
             def.format.video.nFrameWidth,
             def.format.video.nFrameHeight,
 #ifdef USE_SAMSUNG_COLORFORMAT
-            eNativeColorFormat,
+            eColorFormat,
 #else
             def.format.video.eColorFormat,
 #endif
@@ -1878,6 +1907,12 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
     if (err != 0) {
         return err;
     }
+
+#ifdef USE_SAMSUNG_COLORFORMAT
+    if (mNativeWindow != NULL) {
+        initNativeWindowCrop();
+    }
+#endif
 
     int minUndequeuedBufs = 0;
     err = mNativeWindow->query(mNativeWindow.get(),
@@ -3090,8 +3125,6 @@ bool OMXCodec::drainInputBuffer(BufferInfo *info) {
                 info->mMediaBuffer = srcBuffer;
         } else {
 #ifdef USE_SAMSUNG_COLORFORMAT
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wswitch"
             OMX_PARAM_PORTDEFINITIONTYPE def;
             InitOMXParams(&def);
             def.nPortIndex = kPortIndexInput;
@@ -3125,7 +3158,6 @@ bool OMXCodec::drainInputBuffer(BufferInfo *info) {
                             + srcBuffer->range_offset(),
                         srcBuffer->range_length());
             }
-#pragma clang diagnostic pop
 #else
             CHECK(srcBuffer->data() != NULL) ;
             memcpy((uint8_t *)info->mData + offset,
